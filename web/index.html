@@ -1,0 +1,110 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>GPS + Ping2 Survey</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="headerbar">
+    <div class="left">
+      <button class="btn green" id="btnStartSurvey">Start Survey</button>
+      <button class="btn red" id="btnStopSurvey">Stop Survey</button>
+      <button class="btn" id="btnPauseSurvey">Pause</button>
+      <button class="btn" id="btnNewLine">New Line</button>
+    </div>
+    <div class="right" id="headerText">
+      GPS: — • Sats: — • Lat: — • Lon: — • Speed: — • Depth: — • Pos: corrected
+    </div>
+  </div>
+
+  <div id="map"></div>
+
+  <div class="panel" id="sidePanel">
+    <h3>Controls</h3>
+
+    <div class="row"><span class="muted">Survey</span><span id="surveyState">No active survey</span></div>
+    <div class="divider"></div>
+
+    <div class="row">
+      <span class="muted">Position</span>
+      <span>
+        <button class="btn small" id="posRaw">raw</button>
+        <button class="btn small" id="posCorr">corrected</button>
+      </span>
+    </div>
+
+    <div class="row"><span class="muted">Raw</span><span id="rawLatLon">—</span></div>
+    <div class="row"><span class="muted">Corrected</span><span id="corrLatLon">—</span></div>
+
+    <div class="divider"></div>
+
+    <div class="row">
+      <span class="muted">Units</span>
+      <span>
+        <button class="btn small" id="unitM">m</button>
+        <button class="btn small" id="unitFT">ft</button>
+      </span>
+    </div>
+
+    <div class="row">
+      <span class="muted">Basemap opacity</span>
+      <span id="opacityVal" class="muted">100%</span>
+    </div>
+    <input id="opacitySlider" class="slider" type="range" min="0" max="100" value="100">
+
+    <div class="row" style="margin-top:10px;">
+      <span class="muted">Swath opacity</span>
+      <span id="swathOpacityVal" class="muted">35%</span>
+    </div>
+    <input id="swathOpacitySlider" class="slider" type="range" min="0" max="100" value="35">
+
+    <div class="divider"></div>
+
+    <div class="row">
+      <span class="muted">Follow</span>
+      <span><input id="followToggle" type="checkbox" checked /></span>
+    </div>
+    <button class="btn small" id="clearTrack" style="width:100%; margin-top:8px;">Clear Track</button>
+
+    <div class="divider"></div>
+
+    <div id="exportBusy" style="display:none;">
+      <div style="display:flex; align-items:center; gap:8px;">
+        <div class="spinner"></div>
+        <div id="busyMsg" class="muted">Exporting…</div>
+      </div>
+      <div class="progressShell"><div class="progressBar" id="bar"></div></div>
+    </div>
+
+    <div id="downloads" style="margin-top:10px;"></div>
+  </div>
+
+  <div class="depthLegend" id="legendPanel">
+    <h3 style="margin:0 0 10px 0;">Depth Legend</h3>
+    <div class="row"><span class="muted">Min</span><span id="legendMin">—</span></div>
+    <div class="row"><span class="muted">Max</span><span id="legendMax">—</span></div>
+    <div class="colorBarContainer">
+      <div class="depthTick" id="depthTick"></div>
+    </div>
+    <div class="row" style="margin-top:6px;"><span class="muted">Scale</span><span class="muted">shallow → deep</span></div>
+  </div>
+
+  <div class="footerbar">
+    <div class="right">
+      <div class="status" id="footerStatus">Ready</div>
+      <button class="btn small" id="btnCsv">CSV</button>
+      <button class="btn small" id="btnGJ">GeoJSON</button>
+      <button class="btn small" id="btnTif">GeoTIFF</button>
+      <button class="btn small" id="btnAll">All</button>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
