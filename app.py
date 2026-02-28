@@ -1,0 +1,552 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import os
+import threading
+import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Optional
+
+import serial
+import pynmea2
+from flask import Flask, jsonify, Response, abort, request, send_file
+
+try:
+    from bluerobotics_ping.ping1d import Ping1D
+except Exception:
+    Ping1D = None
+
+from survey.geo import apply_antenna_offset
+from survey.sqlite_logger import SQLiteLogger
+from survey import exporters
+
+
+def utc_iso_now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+@dataclass
+class GPSState:
+    pc_time_utc_iso: str = ""
+    nmea_time_utc: str = ""
+    lat_deg: Optional[float] = None
+    lon_deg: Optional[float] = None
+    fix_quality: Optional[int] = None
+    num_sats: Optional[int] = None
+    hdop: Optional[float] = None
+    alt_m: Optional[float] = None
+    sog_knots: Optional[float] = None
+    cog_deg: Optional[float] = None
+
+
+@dataclass
+class PingState:
+    distance_m: Optional[float] = None
+    confidence: Optional[int] = None
+    ping_number: Optional[int] = None
+
+
+class SharedState:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.gps = GPSState()
+        self.ping = PingState()
+        self.last_gps_update = 0.0
+        self.last_ping_update = 0.0
+
+
+@dataclass
+class SurveyStatus:
+    active: bool = False
+    paused: bool = True
+    session_id: Optional[int] = None
+    line_id: Optional[int] = None
+    line_number: int = 0
+    line_label: str = ""
+
+
+class SurveyController:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.st = SurveyStatus()
+
+    def snapshot(self) -> dict:
+        with self.lock:
+            return {
+                "active": self.st.active,
+                "paused": self.st.paused,
+                "session_id": self.st.session_id,
+                "line_id": self.st.line_id,
+                "line_number": self.st.line_number,
+                "line_label": self.st.line_label,
+            }
+
+    def can_log(self) -> bool:
+        with self.lock:
+            return self.st.active and (not self.st.paused)
+
+    def set_started(self, session_id: int, line_id: int, line_number: int, line_label: str):
+        with self.lock:
+            self.st.active = True
+            self.st.paused = False
+            self.st.session_id = session_id
+            self.st.line_id = line_id
+            self.st.line_number = line_number
+            self.st.line_label = line_label
+
+    def set_paused(self, paused: bool):
+        with self.lock:
+            if not self.st.active:
+                return
+            self.st.paused = paused
+
+    def set_stopped(self):
+        with self.lock:
+            self.st.paused = True
+            self.st.active = False
+
+
+def gps_reader_thread(state: SharedState, port: str, baud: int, timeout: float = 1.0):
+    try:
+        ser = serial.Serial(port, baudrate=baud, timeout=timeout)
+    except Exception as e:
+        print(f"[GPS] Failed to open {port}: {e}")
+        return
+
+    print(f"[GPS] Reading NMEA from {port} @ {baud} ...")
+    while True:
+        try:
+            line = ser.readline().decode(errors="ignore").strip()
+            if not line.startswith("$"):
+                continue
+            try:
+                msg = pynmea2.parse(line)
+            except pynmea2.ParseError:
+                continue
+
+            with state.lock:
+                state.gps.pc_time_utc_iso = utc_iso_now()
+                if msg.sentence_type == "GGA":
+                    state.gps.nmea_time_utc = str(getattr(msg, "timestamp", "") or "")
+                    state.gps.lat_deg = getattr(msg, "latitude", None)
+                    state.gps.lon_deg = getattr(msg, "longitude", None)
+                    try: state.gps.fix_quality = int(getattr(msg, "gps_qual", "") or 0)
+                    except Exception: state.gps.fix_quality = None
+                    try: state.gps.num_sats = int(getattr(msg, "num_sats", "") or 0)
+                    except Exception: state.gps.num_sats = None
+                    try: state.gps.hdop = float(getattr(msg, "horizontal_dil", "") or 0.0)
+                    except Exception: state.gps.hdop = None
+                    try: state.gps.alt_m = float(getattr(msg, "altitude", "") or 0.0)
+                    except Exception: state.gps.alt_m = None
+                    state.last_gps_update = time.time()
+
+                elif msg.sentence_type == "RMC":
+                    state.gps.nmea_time_utc = str(getattr(msg, "timestamp", "") or "")
+                    state.gps.lat_deg = getattr(msg, "latitude", None)
+                    state.gps.lon_deg = getattr(msg, "longitude", None)
+                    try: state.gps.sog_knots = float(getattr(msg, "spd_over_grnd", "") or 0.0)
+                    except Exception: state.gps.sog_knots = None
+                    try: state.gps.cog_deg = float(getattr(msg, "true_course", "") or 0.0)
+                    except Exception: state.gps.cog_deg = None
+                    if getattr(msg, "status", "") == "A":
+                        state.last_gps_update = time.time()
+
+        except Exception as e:
+            print(f"[GPS] Error: {e}")
+            time.sleep(0.2)
+
+
+def ping_reader_thread(state: SharedState, port: str, baud: int, poll_hz: float = 10.0):
+    if Ping1D is None:
+        print("[PING] Missing Ping1D. Install: pip install bluerobotics-ping")
+        return
+
+    ping = Ping1D()
+    try:
+        ok = ping.connect_serial(port, baud)
+    except Exception as e:
+        print(f"[PING] Failed to open {port}: {e}")
+        return
+    if not ok:
+        print(f"[PING] connect_serial() returned False for {port}")
+        return
+
+    print(f"[PING] Reading Ping2 from {port} @ {baud} ...")
+    period = 1.0 / max(0.5, poll_hz)
+
+    while True:
+        try:
+            data = ping.get_distance()
+            with state.lock:
+                dist = data.get("distance")
+                if dist is not None:
+                    state.ping.distance_m = float(dist) / 1000.0 if dist > 50 else float(dist)
+                conf = data.get("confidence")
+                state.ping.confidence = int(conf) if conf is not None else None
+                pn = data.get("ping_number")
+                state.ping.ping_number = int(pn) if pn is not None else None
+                state.last_ping_update = time.time()
+        except Exception as e:
+            print(f"[PING] Error: {e}")
+            time.sleep(0.2)
+        time.sleep(period)
+
+
+def load_basemaps(path: str) -> dict:
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    for k, v in data.items():
+        if "path" not in v:
+            raise ValueError(f"Basemap '{k}' missing 'path'")
+        v.setdefault("label", k)
+        v.setdefault("format", "png")
+    return data
+
+
+def start_web_ui(shared: SharedState, survey: SurveyController, sqlite_logger: Optional[SQLiteLogger], sqlite_path: Optional[str],
+                 basemaps: dict, ant_forward_m: float, ant_right_m: float, stale_seconds: float, host: str, port: int):
+    app = Flask(__name__, static_folder="web", static_url_path="/static")
+    app.basemaps = basemaps
+
+    def mbtiles_get_tile(mbtiles_path: str, z: int, x: int, y_xyz: int):
+        import sqlite3
+        tms_y = (2 ** z - 1) - y_xyz
+        conn = sqlite3.connect(mbtiles_path)
+        try:
+            cur = conn.execute("SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?", (z, x, tms_y))
+            row = cur.fetchone()
+            return row[0] if row else None
+        finally:
+            conn.close()
+
+    @app.get("/basemaps")
+    def basemaps_endpoint():
+        out = []
+        for map_id, cfg in app.basemaps.items():
+            out.append({"id": map_id, "label": cfg.get("label", map_id), "format": cfg.get("format", "png")})
+        return jsonify(out)
+
+    @app.get("/tiles/<map_id>/<int:z>/<int:x>/<int:y>.<ext>")
+    def tiles(map_id: str, z: int, x: int, y: int, ext: str):
+        cfg = app.basemaps.get(map_id)
+        if not cfg:
+            abort(404)
+        fmt = cfg.get("format", "png").lower()
+        if ext.lower() != fmt:
+            abort(404)
+        data = mbtiles_get_tile(cfg["path"], z, x, y)
+        if data is None:
+            abort(404)
+        mimetype = "image/png" if fmt == "png" else "image/jpeg"
+        return Response(data, mimetype=mimetype)
+
+    @app.get("/")
+    def index():
+        with open(os.path.join("web", "index.html"), "r", encoding="utf-8") as f:
+            return Response(f.read(), mimetype="text/html")
+
+    @app.get("/data")
+    def data():
+        now = time.time()
+        with shared.lock:
+            gps_age = now - shared.last_gps_update if shared.last_gps_update else 1e9
+            ping_age = now - shared.last_ping_update if shared.last_ping_update else 1e9
+
+            raw_lat = shared.gps.lat_deg
+            raw_lon = shared.gps.lon_deg
+            cog = shared.gps.cog_deg
+            corr_lat, corr_lon = apply_antenna_offset(raw_lat, raw_lon, cog, ant_forward_m, ant_right_m)
+
+            payload = {
+                "pc_time_utc_iso": utc_iso_now(),
+                "gps_raw_lat_deg": raw_lat,
+                "gps_raw_lon_deg": raw_lon,
+                "gps_corr_lat_deg": corr_lat,
+                "gps_corr_lon_deg": corr_lon,
+                "gps_nmea_time_utc": shared.gps.nmea_time_utc,
+                "gps_fix_quality": shared.gps.fix_quality,
+                "gps_num_sats": shared.gps.num_sats,
+                "gps_hdop": shared.gps.hdop,
+                "gps_alt_m": shared.gps.alt_m,
+                "gps_sog_knots": shared.gps.sog_knots,
+                "gps_cog_deg": cog,
+                "ping_distance_m": shared.ping.distance_m,
+                "ping_confidence": shared.ping.confidence,
+                "ping_ping_number": shared.ping.ping_number,
+                "gps_age_s": float(gps_age),
+                "ping_age_s": float(ping_age),
+            }
+        payload["gps_stale"] = payload["gps_age_s"] > stale_seconds
+        payload["ping_stale"] = payload["ping_age_s"] > stale_seconds
+        return jsonify(payload)
+
+    @app.get("/survey/status")
+    def survey_status():
+        return jsonify(survey.snapshot())
+
+    @app.post("/survey/start")
+    def survey_start():
+        if sqlite_logger is None or sqlite_path is None:
+            return jsonify({"error": "SQLite not configured"}), 400
+
+        data = request.get_json(force=True) or {}
+        notes = (data.get("notes") or "").strip()
+        line_label = (data.get("line_label") or "Line 1").strip()
+
+        st = survey.snapshot()
+        if st["active"]:
+            return jsonify({"error": "Survey already active"}), 400
+
+        now_local = datetime.now().astimezone()
+        now_utc = datetime.now(timezone.utc)
+
+        session_meta = dict(
+            start_utc=now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            start_local=now_local.strftime("%Y-%m-%d %H:%M:%S"),
+            tz_abbr=now_local.strftime("%Z") or "LOCAL",
+            utc_offset=f"UTC{now_local.strftime('%z')}",
+            gps_port=os.environ.get("GPS_PORT", ""),
+            gps_baud=int(os.environ.get("GPS_BAUD", "9600")),
+            ping_port=os.environ.get("PING_PORT", ""),
+            ping_baud=int(os.environ.get("PING_BAUD", "115200")),
+            log_hz=float(os.environ.get("LOG_HZ", "2.0")),
+            ping_hz=float(os.environ.get("PING_HZ", "10.0")),
+            notes=notes,
+        )
+
+        sid = sqlite_logger.start_session(session_meta)
+        lid, lnum = sqlite_logger.start_new_line(line_label)
+        survey.set_started(sid, lid, lnum, line_label)
+        return jsonify({"status": "started", **survey.snapshot()})
+
+    @app.post("/survey/pause")
+    def survey_pause():
+        st = survey.snapshot()
+        if not st["active"]:
+            return jsonify({"error": "No active survey"}), 400
+        survey.set_paused(True)
+        if sqlite_logger is not None:
+            sqlite_logger.flush()
+        return jsonify({"status": "paused", **survey.snapshot()})
+
+    @app.post("/survey/resume")
+    def survey_resume():
+        st = survey.snapshot()
+        if not st["active"]:
+            return jsonify({"error": "No active survey"}), 400
+        survey.set_paused(False)
+        return jsonify({"status": "resumed", **survey.snapshot()})
+
+    @app.post("/survey/new_line")
+    def survey_new_line():
+        if sqlite_logger is None:
+            return jsonify({"error": "SQLite not configured"}), 400
+        st = survey.snapshot()
+        if not st["active"]:
+            return jsonify({"error": "No active survey"}), 400
+        data = request.get_json(force=True) or {}
+        label = (data.get("label") or "").strip()
+        lid, lnum = sqlite_logger.start_new_line(label or f"Line {st['line_number'] + 1}")
+        with survey.lock:
+            survey.st.line_id = lid
+            survey.st.line_number = lnum
+            survey.st.line_label = label or f"Line {lnum}"
+        return jsonify({"status": "new_line", **survey.snapshot()})
+
+    @app.post("/survey/stop")
+    def survey_stop():
+        st = survey.snapshot()
+        if not st["active"]:
+            return jsonify({"error": "No active survey"}), 400
+        survey.set_stopped()
+        if sqlite_logger is not None:
+            sqlite_logger.flush()
+        return jsonify({"status": "stopped", **survey.snapshot()})
+
+    export_lock = threading.Lock()
+    export_jobs = {}
+
+    def job_update(job_id: str, **kwargs):
+        with export_lock:
+            export_jobs[job_id].update(kwargs)
+
+    @app.post("/export/start")
+    def export_start():
+        if sqlite_path is None:
+            return jsonify({"error": "SQLite not configured"}), 400
+
+        st = survey.snapshot()
+        session_id = st.get("session_id")
+        if session_id is None:
+            return jsonify({"error": "No session to export. Start a survey first."}), 400
+
+        data = request.get_json(force=True) or {}
+        fmt = data.get("format", "csv")
+        export_dir = data.get("export_dir", "exports")
+        grid_m = float(data.get("grid_m", 2.0))
+        method = data.get("method", "mean")
+        pos_source = data.get("position_source", "corr")
+        use_corr = (pos_source != "raw")
+
+        import uuid
+        job_id = uuid.uuid4().hex
+        with export_lock:
+            export_jobs[job_id] = {"status": "running", "progress": 0, "message": "Queued", "outputs": []}
+
+        def runner():
+            try:
+                os.makedirs(export_dir, exist_ok=True)
+                base = f"session_{session_id}_{datetime.now().astimezone().strftime('%Y%m%d_%H%M%S_%Z')}_UTC{datetime.now().astimezone().strftime('%z')}"
+                outs = []
+
+                def setp(p, msg=""):
+                    job_update(job_id, progress=int(p), message=msg)
+
+                setp(5, "Starting export...")
+
+                if fmt in ("csv", "all"):
+                    setp(15, "Exporting CSV...")
+                    out_csv = os.path.join(export_dir, f"{base}.csv")
+                    exporters.export_csv(sqlite_path, session_id, out_csv)
+                    outs.append({"label": "CSV", "path": os.path.abspath(out_csv)})
+                    setp(25, "CSV complete.")
+
+                if fmt in ("geojson", "all"):
+                    setp(35, "Exporting GeoJSON...")
+                    out_gj = os.path.join(export_dir, f"{base}.geojson")
+                    exporters.export_geojson(sqlite_path, session_id, out_gj, use_corrected=use_corr)
+                    outs.append({"label": "GeoJSON", "path": os.path.abspath(out_gj)})
+                    setp(55, "GeoJSON complete.")
+
+                if fmt in ("geotiff", "all"):
+                    setp(65, "Exporting GeoTIFF (gridding depth)...")
+                    out_tif = os.path.join(export_dir, f"{base}_depth.tif")
+                    exporters.export_geotiff_depth(sqlite_path, session_id, out_tif, grid_m=grid_m, method=method, use_corrected=use_corr)
+                    outs.append({"label": "GeoTIFF", "path": os.path.abspath(out_tif)})
+                    setp(95, "GeoTIFF complete.")
+
+                job_update(job_id, status="done", progress=100, message="Export complete.", outputs=outs)
+            except Exception as e:
+                job_update(job_id, status="error", progress=100, message=str(e), outputs=[])
+
+        threading.Thread(target=runner, daemon=True).start()
+        return jsonify({"job_id": job_id})
+
+    @app.get("/export/status/<job_id>")
+    def export_status(job_id: str):
+        with export_lock:
+            j = export_jobs.get(job_id)
+        if not j:
+            return jsonify({"error": "unknown job"}), 404
+        return jsonify(j)
+
+    @app.get("/export/download")
+    def export_download():
+        path = request.args.get("path", "")
+        if not path:
+            return jsonify({"error": "missing path"}), 400
+
+        export_root = os.path.abspath("exports")
+        abs_path = os.path.abspath(path)
+        if not abs_path.startswith(export_root + os.sep):
+            return jsonify({"error": "forbidden"}), 403
+        if not os.path.exists(abs_path):
+            return jsonify({"error": "not found"}), 404
+        return send_file(abs_path, as_attachment=True)
+
+    print(f"[WEB] Serving on http://{host}:{port}/")
+    app.run(host=host, port=port, debug=False, threaded=True, use_reloader=False)
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Raspberry Pi GPS + Ping2 survey logger with WebUI.")
+    ap.add_argument("--gps-port", required=True)
+    ap.add_argument("--gps-baud", type=int, default=9600)
+    ap.add_argument("--ping-port", required=True)
+    ap.add_argument("--ping-baud", type=int, default=115200)
+    ap.add_argument("--log-hz", type=float, default=2.0)
+    ap.add_argument("--ping-hz", type=float, default=10.0)
+    ap.add_argument("--stale-seconds", type=float, default=2.0)
+    ap.add_argument("--sqlite", default="logs.db", help="SQLite DB path")
+    ap.add_argument("--sqlite-batch", type=int, default=50)
+    ap.add_argument("--basemaps", default="basemaps.json", help="Basemap catalog JSON")
+    ap.add_argument("--web-host", default="0.0.0.0")
+    ap.add_argument("--web-port", type=int, default=5000)
+    ap.add_argument("--ant-forward-m", type=float, default=0.0)
+    ap.add_argument("--ant-right-m", type=float, default=0.0)
+    args = ap.parse_args()
+
+    os.environ["GPS_PORT"] = args.gps_port
+    os.environ["GPS_BAUD"] = str(args.gps_baud)
+    os.environ["PING_PORT"] = args.ping_port
+    os.environ["PING_BAUD"] = str(args.ping_baud)
+    os.environ["LOG_HZ"] = str(args.log_hz)
+    os.environ["PING_HZ"] = str(args.ping_hz)
+
+    basemaps = load_basemaps(args.basemaps)
+    shared = SharedState()
+    survey = SurveyController()
+
+    threading.Thread(target=gps_reader_thread, args=(shared, args.gps_port, args.gps_baud), daemon=True).start()
+    threading.Thread(target=ping_reader_thread, args=(shared, args.ping_port, args.ping_baud, args.ping_hz), daemon=True).start()
+
+    sqlite_logger = SQLiteLogger(args.sqlite, batch_size=args.sqlite_batch) if args.sqlite else None
+
+    threading.Thread(
+        target=start_web_ui,
+        args=(shared, survey, sqlite_logger, args.sqlite, basemaps, args.ant_forward_m, args.ant_right_m, args.stale_seconds, args.web_host, args.web_port),
+        daemon=True
+    ).start()
+
+    print("[LOG] Waiting for survey start from WebUI...")
+    period = 1.0 / max(0.1, args.log_hz)
+
+    try:
+        while True:
+            now = time.time()
+            with shared.lock:
+                gps_age = now - shared.last_gps_update if shared.last_gps_update else 1e9
+                ping_age = now - shared.last_ping_update if shared.last_ping_update else 1e9
+                gps_stale = gps_age > args.stale_seconds
+                ping_stale = ping_age > args.stale_seconds
+
+                raw_lat = shared.gps.lat_deg
+                raw_lon = shared.gps.lon_deg
+                cog = shared.gps.cog_deg
+                corr_lat, corr_lon = apply_antenna_offset(raw_lat, raw_lon, cog, args.ant_forward_m, args.ant_right_m)
+
+                row = {
+                    "pc_time_utc_iso": utc_iso_now(),
+                    "gps_nmea_time_utc": shared.gps.nmea_time_utc,
+                    "gps_raw_lat_deg": raw_lat,
+                    "gps_raw_lon_deg": raw_lon,
+                    "gps_corr_lat_deg": corr_lat,
+                    "gps_corr_lon_deg": corr_lon,
+                    "gps_fix_quality": shared.gps.fix_quality,
+                    "gps_num_sats": shared.gps.num_sats,
+                    "gps_hdop": shared.gps.hdop,
+                    "gps_alt_m": shared.gps.alt_m,
+                    "gps_sog_knots": shared.gps.sog_knots,
+                    "gps_cog_deg": cog,
+                    "ping_distance_m": shared.ping.distance_m,
+                    "ping_confidence": shared.ping.confidence,
+                    "ping_ping_number": shared.ping.ping_number,
+                    "gps_stale": int(gps_stale),
+                    "ping_stale": int(ping_stale),
+                }
+
+            if survey.can_log() and sqlite_logger is not None:
+                sqlite_logger.log_row(row)
+
+            time.sleep(period)
+
+    except KeyboardInterrupt:
+        print("\n[LOG] Stopped.")
+    finally:
+        if sqlite_logger is not None:
+            sqlite_logger.close()
+
+
+if __name__ == "__main__":
+    main()

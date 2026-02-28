@@ -1,0 +1,17 @@
+{
+  "osm": {
+    "label": "OSM Raster (offline)",
+    "path": "/home/pi/maps/osm.mbtiles",
+    "format": "png"
+  },
+  "sat": {
+    "label": "Satellite (offline)",
+    "path": "/home/pi/maps/sat.mbtiles",
+    "format": "jpg"
+  },
+  "naut": {
+    "label": "Nautical (offline)",
+    "path": "/home/pi/maps/nautical.mbtiles",
+    "format": "png"
+  }
+}
