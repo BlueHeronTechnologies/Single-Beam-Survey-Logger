@@ -135,3 +135,88 @@ body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
   border-right:10px solid transparent;
   border-bottom:22px solid #111;
 }
+
+
+
+/* ===== Enhanced recording indicator + header tint ===== */
+.headerbar.state-idle { background: rgba(0,0,0,0.75); }
+.headerbar.state-recording {
+  background: rgba(0, 40, 30, 0.78);
+  box-shadow: 0 0 16px rgba(0, 255, 180, 0.10);
+}
+.headerbar.state-paused {
+  background: rgba(45, 10, 10, 0.78);
+  box-shadow: 0 0 16px rgba(255, 80, 80, 0.10);
+}
+
+.rec-text{
+  font-weight:700; letter-spacing:0.6px; text-transform:uppercase;
+  font-size:14px; opacity:0.95;
+}
+.rec-dot{
+  width:12px; height:12px; border-radius:50%;
+  background: rgba(255,255,255,0.22);
+  box-shadow: 0 0 0 rgba(0,0,0,0);
+}
+.rec-dot.recording{
+  background: rgba(0, 255, 180, 0.95);
+  box-shadow: 0 0 14px rgba(0, 255, 180, 0.55);
+  animation: pulseGreen 1.0s ease-in-out infinite;
+}
+.rec-dot.paused{
+  background: rgba(255, 70, 70, 0.95);
+  box-shadow: 0 0 14px rgba(255, 70, 70, 0.55);
+  animation: pulseRed 1.2s ease-in-out infinite;
+}
+@keyframes pulseGreen {
+  0%{transform:scale(0.90);opacity:0.65;}
+  50%{transform:scale(1.18);opacity:1.0;}
+  100%{transform:scale(0.90);opacity:0.65;}
+}
+@keyframes pulseRed {
+  0%{transform:scale(0.92);opacity:0.65;}
+  50%{transform:scale(1.15);opacity:1.0;}
+  100%{transform:scale(0.92);opacity:0.65;}
+}
+
+.panel .btn { width: 100%; }
+
+
+/* Collapsible Details Section */
+.detailsBox {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.10);
+}
+
+.detailsSummary {
+  cursor: pointer;
+  user-select: none;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  opacity: 0.95;
+}
+
+.detailsBox summary::marker {
+  color: rgba(255,255,255,0.75);
+}
+
+
+
+/* Export label + subtle SVG icon */
+.exportLabel{
+  display:flex;
+  align-items:center;
+  gap:6px;
+  font-weight:600;
+  letter-spacing:0.2px;
+  opacity:0.9;
+  white-space:nowrap;
+}
+.exportLabel svg{
+  width:14px;
+  height:14px;
+  opacity:0.85;
+}

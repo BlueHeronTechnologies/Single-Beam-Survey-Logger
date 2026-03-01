@@ -113,7 +113,63 @@
   document.getElementById("clearTrack").onclick = () => { trackLine.setLatLngs([]); swathLayer.clearLayers(); lastTrackLL = null; lastSwathLL = null; };
 
   async function postJSON(url, body) {
-    const r = await fetch(url, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body || {}) });
+    const r = await fetch(url, { method:"POST", headers:{"Content-Type":"application/json"}
+
+
+// Settings modal
+const modal = document.getElementById("settingsModal");
+const btnSettings = document.getElementById("btnSettings");
+const btnCloseSettings = document.getElementById("btnCloseSettings");
+const btnReloadPorts = document.getElementById("btnReloadPorts");
+const btnSaveSettings = document.getElementById("btnSaveSettings");
+const settingsMsg = document.getElementById("settingsMsg");
+
+const gpsPort = document.getElementById("gpsPort");
+const gpsBaud = document.getElementById("gpsBaud");
+const pingPort = document.getElementById("pingPort");
+const pingBaud = document.getElementById("pingBaud");
+
+async function loadConfig() {
+  if (!settingsMsg) return;
+  settingsMsg.textContent = "Loading…";
+  const r = await fetch("/config", { cache: "no-store" });
+  const j = await r.json();
+  if (!r.ok) { settingsMsg.textContent = j.error || "Failed to load config"; return; }
+  if (gpsPort) gpsPort.value = j.gps_port || "";
+  if (gpsBaud) gpsBaud.value = j.gps_baud || "";
+  if (pingPort) pingPort.value = j.ping_port || "";
+  if (pingBaud) pingBaud.value = j.ping_baud || "";
+  settingsMsg.textContent = `Loaded. GPS: ${j.gps_status} • Ping: ${j.ping_status}`;
+}
+
+if (btnSettings && modal) {
+  btnSettings.onclick = async () => {
+    modal.style.display = "block";
+    await loadConfig();
+  };
+}
+if (btnCloseSettings && modal) btnCloseSettings.onclick = () => { modal.style.display = "none"; };
+if (modal) modal.addEventListener("click", (e) => { if (e.target === modal) modal.style.display = "none"; });
+
+if (btnReloadPorts) btnReloadPorts.onclick = loadConfig;
+
+if (btnSaveSettings) btnSaveSettings.onclick = async () => {
+  if (!settingsMsg) return;
+  settingsMsg.textContent = "Saving…";
+  try {
+    const payload = {
+      gps_port: (gpsPort?.value || "").trim(),
+      gps_baud: parseInt(gpsBaud?.value || "9600", 10),
+      ping_port: (pingPort?.value || "").trim(),
+      ping_baud: parseInt(pingBaud?.value || "115200", 10),
+    };
+    const j = await postJSON("/config", payload);
+    settingsMsg.textContent = `Reconnected. GPS: ${j.gps_status} • Ping: ${j.ping_status}`;
+  } catch (e) {
+    settingsMsg.textContent = "Save failed: " + e.message;
+  }
+};
+, body: JSON.stringify(body || {}) });
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || "request failed");
     return j;
@@ -123,7 +179,11 @@
   document.getElementById("btnStopSurvey").onclick = async () => { await postJSON("/survey/stop"); };
   document.getElementById("btnPauseSurvey").onclick = async () => {
     const st = await (await fetch("/survey/status", {cache:"no-store"})).json();
-    if (st.paused) await postJSON("/survey/resume"); else await postJSON("/survey/pause");
+    
+      const headerBar = document.getElementById("headerBar");
+      const recDot = document.getElementById("recDot");
+      const recLabel = document.getElementById("recLabel");
+if (st.paused) await postJSON("/survey/resume"); else await postJSON("/survey/pause");
   };
   document.getElementById("btnNewLine").onclick = async () => {
     const label = prompt("New line label (optional):") || "";
@@ -146,7 +206,27 @@
 
       pauseBtn.textContent = st.paused ? "Resume" : "Pause";
       label.textContent = st.active ? `Session ${st.session_id} • Line ${st.line_number} • ${st.paused ? "PAUSED" : "RUNNING"}` : "No active survey";
-    } catch (e) {}
+    
+
+const active = !!st.active;
+const paused = !!st.paused;
+
+if (recDot) recDot.classList.remove("recording", "paused");
+if (headerBar) headerBar.classList.remove("state-idle", "state-recording", "state-paused");
+
+if (!active) {
+  if (headerBar) headerBar.classList.add("state-idle");
+  if (recLabel) recLabel.textContent = "Idle";
+} else if (paused) {
+  if (headerBar) headerBar.classList.add("state-paused");
+  if (recDot) recDot.classList.add("paused");
+  if (recLabel) recLabel.textContent = `Paused • Session ${st.session_id} • Line ${st.line_number}`;
+} else {
+  if (headerBar) headerBar.classList.add("state-recording");
+  if (recDot) recDot.classList.add("recording");
+  if (recLabel) recLabel.textContent = `Recording • Session ${st.session_id} • Line ${st.line_number}`;
+}
+} catch (e) {}
     setTimeout(refreshSurveyUI, 800);
   }
   refreshSurveyUI();
@@ -163,7 +243,7 @@
   async function startExport(fmt) {
     downloads.innerHTML = "";
     setExportButtonsEnabled(false);
-    busy.style.display = "block";
+    busy.style.display = "flex";
     busyMsg.textContent = "Starting export…";
     bar.style.width = "0%";
     footerStatus.textContent = "Exporting…";

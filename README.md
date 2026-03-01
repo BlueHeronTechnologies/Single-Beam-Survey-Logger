@@ -75,3 +75,8 @@ hostname -I
 - `survey/` – SQLite + export code
 - `web/` – HTML/CSS/JS for the WebUI
 - `basemaps.json` – example basemap catalog
+
+
+## Settings (Ports/Baud)
+
+Use the **⚙ Settings** button in the header to configure GPS/Ping ports and baud rates. Settings are saved to `config.json` and the app will reconnect immediately.

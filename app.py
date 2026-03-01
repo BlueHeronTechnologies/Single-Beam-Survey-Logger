@@ -22,6 +22,32 @@ from survey.sqlite_logger import SQLiteLogger
 from survey import exporters
 
 
+CONFIG_PATH = "config.json"
+
+def load_config_defaults(args) -> dict:
+    cfg = {
+        "gps_port": args.gps_port,
+        "gps_baud": args.gps_baud,
+        "ping_port": args.ping_port,
+        "ping_baud": args.ping_baud,
+    }
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                disk = json.load(f)
+            for k in list(cfg.keys()):
+                if k in disk and disk[k] is not None:
+                    cfg[k] = disk[k]
+        except Exception:
+            pass
+    return cfg
+
+def save_config(cfg: dict) -> None:
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
+
+
+
 def utc_iso_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -105,6 +131,137 @@ class SurveyController:
         with self.lock:
             self.st.paused = True
             self.st.active = False
+
+
+class GPSReader:
+    def __init__(self, shared: SharedState):
+        self.shared = shared
+        self._stop = threading.Event()
+        self._thread = None
+        self.port = None
+        self.baud = None
+        self.status = "stopped"
+
+    def start(self, port: str, baud: int):
+        self.stop()
+        self._stop.clear()
+        self.port, self.baud = port, int(baud)
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+
+    def _run(self):
+        try:
+            ser = serial.Serial(self.port, baudrate=self.baud, timeout=1.0)
+            self.status = f"connected {self.port}@{self.baud}"
+        except Exception as e:
+            self.status = f"error opening {self.port}: {e}"
+            return
+
+        while not self._stop.is_set():
+            try:
+                line = ser.readline().decode(errors="ignore").strip()
+                if not line.startswith("$"):
+                    continue
+                try:
+                    msg = pynmea2.parse(line)
+                except pynmea2.ParseError:
+                    continue
+
+                with self.shared.lock:
+                    self.shared.gps.pc_time_utc_iso = utc_iso_now()
+
+                    if msg.sentence_type == "GGA":
+                        self.shared.gps.nmea_time_utc = str(getattr(msg, "timestamp", "") or "")
+                        self.shared.gps.lat_deg = getattr(msg, "latitude", None)
+                        self.shared.gps.lon_deg = getattr(msg, "longitude", None)
+                        try: self.shared.gps.fix_quality = int(getattr(msg, "gps_qual", "") or 0)
+                        except Exception: self.shared.gps.fix_quality = None
+                        try: self.shared.gps.num_sats = int(getattr(msg, "num_sats", "") or 0)
+                        except Exception: self.shared.gps.num_sats = None
+                        try: self.shared.gps.hdop = float(getattr(msg, "horizontal_dil", "") or 0.0)
+                        except Exception: self.shared.gps.hdop = None
+                        try: self.shared.gps.alt_m = float(getattr(msg, "altitude", "") or 0.0)
+                        except Exception: self.shared.gps.alt_m = None
+                        self.shared.last_gps_update = time.time()
+
+                    elif msg.sentence_type == "RMC":
+                        self.shared.gps.nmea_time_utc = str(getattr(msg, "timestamp", "") or "")
+                        self.shared.gps.lat_deg = getattr(msg, "latitude", None)
+                        self.shared.gps.lon_deg = getattr(msg, "longitude", None)
+                        try: self.shared.gps.sog_knots = float(getattr(msg, "spd_over_grnd", "") or 0.0)
+                        except Exception: self.shared.gps.sog_knots = None
+                        try: self.shared.gps.cog_deg = float(getattr(msg, "true_course", "") or 0.0)
+                        except Exception: self.shared.gps.cog_deg = None
+                        if getattr(msg, "status", "") == "A":
+                            self.shared.last_gps_update = time.time()
+            except Exception:
+                time.sleep(0.2)
+
+        try:
+            ser.close()
+        except Exception:
+            pass
+        self.status = "stopped"
+
+
+class PingReader:
+    def __init__(self, shared: SharedState, poll_hz: float):
+        self.shared = shared
+        self.poll_hz = poll_hz
+        self._stop = threading.Event()
+        self._thread = None
+        self.port = None
+        self.baud = None
+        self.status = "stopped"
+
+    def start(self, port: str, baud: int):
+        self.stop()
+        self._stop.clear()
+        self.port, self.baud = port, int(baud)
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+
+    def _run(self):
+        if Ping1D is None:
+            self.status = "missing bluerobotics-ping"
+            return
+
+        ping = Ping1D()
+        try:
+            ok = ping.connect_serial(self.port, self.baud)
+        except Exception as e:
+            self.status = f"error opening {self.port}: {e}"
+            return
+        if not ok:
+            self.status = f"connect failed {self.port}"
+            return
+
+        self.status = f"connected {self.port}@{self.baud}"
+        period = 1.0 / max(0.5, self.poll_hz)
+
+        while not self._stop.is_set():
+            try:
+                data = ping.get_distance()
+                with self.shared.lock:
+                    dist = data.get("distance")
+                    if dist is not None:
+                        self.shared.ping.distance_m = float(dist) / 1000.0 if dist > 50 else float(dist)
+                    conf = data.get("confidence")
+                    self.shared.ping.confidence = int(conf) if conf is not None else None
+                    pn = data.get("ping_number")
+                    self.shared.ping.ping_number = int(pn) if pn is not None else None
+                    self.shared.last_ping_update = time.time()
+            except Exception:
+                time.sleep(0.2)
+            time.sleep(period)
+
+        self.status = "stopped"
 
 
 def gps_reader_thread(state: SharedState, port: str, baud: int, timeout: float = 1.0):
@@ -205,7 +362,8 @@ def load_basemaps(path: str) -> dict:
 
 
 def start_web_ui(shared: SharedState, survey: SurveyController, sqlite_logger: Optional[SQLiteLogger], sqlite_path: Optional[str],
-                 basemaps: dict, ant_forward_m: float, ant_right_m: float, stale_seconds: float, host: str, port: int):
+                 basemaps: dict, ant_forward_m: float, ant_right_m: float, stale_seconds: float, host: str, port: int,
+                 config: dict, gps_mgr: GPSReader, ping_mgr: PingReader):
     app = Flask(__name__, static_folder="web", static_url_path="/static")
     app.basemaps = basemaps
 
@@ -280,6 +438,38 @@ def start_web_ui(shared: SharedState, survey: SurveyController, sqlite_logger: O
         payload["gps_stale"] = payload["gps_age_s"] > stale_seconds
         payload["ping_stale"] = payload["ping_age_s"] > stale_seconds
         return jsonify(payload)
+
+
+@app.get("/config")
+def get_config():
+    return jsonify({
+        "gps_port": config.get("gps_port", ""),
+        "gps_baud": config.get("gps_baud", 9600),
+        "ping_port": config.get("ping_port", ""),
+        "ping_baud": config.get("ping_baud", 115200),
+        "gps_status": gps_mgr.status,
+        "ping_status": ping_mgr.status,
+    })
+
+@app.post("/config")
+def set_config_endpoint():
+    data = request.get_json(force=True) or {}
+    gp = (data.get("gps_port") or "").strip()
+    gb = int(data.get("gps_baud") or 9600)
+    pp = (data.get("ping_port") or "").strip()
+    pb = int(data.get("ping_baud") or 115200)
+
+    if not gp or not pp:
+        return jsonify({"error": "gps_port and ping_port are required"}), 400
+
+    config.update({"gps_port": gp, "gps_baud": gb, "ping_port": pp, "ping_baud": pb})
+    save_config(config)
+
+    gps_mgr.start(gp, gb)
+    ping_mgr.start(pp, pb)
+
+    return jsonify({"ok": True, "gps_status": gps_mgr.status, "ping_status": ping_mgr.status, **config})
+
 
     @app.get("/survey/status")
     def survey_status():
@@ -485,17 +675,23 @@ def main():
     os.environ["PING_HZ"] = str(args.ping_hz)
 
     basemaps = load_basemaps(args.basemaps)
+
+    cfg = load_config_defaults(args)
+    save_config(cfg)
+
     shared = SharedState()
     survey = SurveyController()
 
-    threading.Thread(target=gps_reader_thread, args=(shared, args.gps_port, args.gps_baud), daemon=True).start()
-    threading.Thread(target=ping_reader_thread, args=(shared, args.ping_port, args.ping_baud, args.ping_hz), daemon=True).start()
+    gps_mgr = GPSReader(shared)
+    ping_mgr = PingReader(shared, poll_hz=args.ping_hz)
+    gps_mgr.start(cfg["gps_port"], cfg["gps_baud"])
+    ping_mgr.start(cfg["ping_port"], cfg["ping_baud"])
 
     sqlite_logger = SQLiteLogger(args.sqlite, batch_size=args.sqlite_batch) if args.sqlite else None
 
     threading.Thread(
         target=start_web_ui,
-        args=(shared, survey, sqlite_logger, args.sqlite, basemaps, args.ant_forward_m, args.ant_right_m, args.stale_seconds, args.web_host, args.web_port),
+        args=(shared, survey, sqlite_logger, args.sqlite, basemaps, args.ant_forward_m, args.ant_right_m, args.stale_seconds, args.web_host, args.web_port, cfg, gps_mgr, ping_mgr),
         daemon=True
     ).start()
 

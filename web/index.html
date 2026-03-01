@@ -11,14 +11,19 @@
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
-  <div class="headerbar">
-    <div class="left">
-      <button class="btn green" id="btnStartSurvey">Start Survey</button>
-      <button class="btn red" id="btnStopSurvey">Stop Survey</button>
-      <button class="btn" id="btnPauseSurvey">Pause</button>
-      <button class="btn" id="btnNewLine">New Line</button>
-    </div>
-    <div class="right" id="headerText">
+  
+<div class="headerbar state-idle" id="headerBar">
+  <div class="left rec-wrap">
+    <span class="rec-dot" id="recDot" title="Recording indicator"></span>
+    <span id="recLabel" class="rec-text">Idle</span>
+    <button class="btn small" id="btnSettings" title="Settings" style="padding:6px 10px;">⚙</button>
+  </div>
+
+  <div class="right" id="headerText">
+    GPS: — • Sats: — • Lat: — • Lon: — • Speed: — • Depth: — • Pos: corrected
+  </div>
+</div>
+<div class="right" id="headerText">
       GPS: — • Sats: — • Lat: — • Lon: — • Speed: — • Depth: — • Pos: corrected
     </div>
   </div>
@@ -27,6 +32,16 @@
 
   <div class="panel" id="sidePanel">
     <h3>Controls</h3>
+
+    <div style="display:flex; flex-direction:column; gap:8px; margin-bottom:10px;">
+      <button class="btn green" id="btnStartSurvey">Start Survey</button>
+      <button class="btn" id="btnPauseSurvey">Pause</button>
+      <button class="btn" id="btnNewLine">New Line</button>
+      <button class="btn red" id="btnStopSurvey">Stop Survey</button>
+    </div>
+
+    <div class="divider"></div>
+
 
     <div class="row"><span class="muted">Survey</span><span id="surveyState">No active survey</span></div>
     <div class="divider"></div>
@@ -39,8 +54,21 @@
       </span>
     </div>
 
-    <div class="row"><span class="muted">Raw</span><span id="rawLatLon">—</span></div>
-    <div class="row"><span class="muted">Corrected</span><span id="corrLatLon">—</span></div>
+    
+<details class="detailsBox">
+  <summary class="detailsSummary">Details</summary>
+
+  <div class="row" style="margin-top:6px;">
+    <span class="muted">Raw</span>
+    <span id="rawLatLon">—</span>
+  </div>
+
+  <div class="row">
+    <span class="muted">Corrected</span>
+    <span id="corrLatLon">—</span>
+  </div>
+</details>
+
 
     <div class="divider"></div>
 
@@ -73,17 +101,7 @@
     <button class="btn small" id="clearTrack" style="width:100%; margin-top:8px;">Clear Track</button>
 
     <div class="divider"></div>
-
-    <div id="exportBusy" style="display:none;">
-      <div style="display:flex; align-items:center; gap:8px;">
-        <div class="spinner"></div>
-        <div id="busyMsg" class="muted">Exporting…</div>
-      </div>
-      <div class="progressShell"><div class="progressBar" id="bar"></div></div>
-    </div>
-
-    <div id="downloads" style="margin-top:10px;"></div>
-  </div>
+</div>
 
   <div class="depthLegend" id="legendPanel">
     <h3 style="margin:0 0 10px 0;">Depth Legend</h3>
@@ -95,15 +113,56 @@
     <div class="row" style="margin-top:6px;"><span class="muted">Scale</span><span class="muted">shallow → deep</span></div>
   </div>
 
-  <div class="footerbar">
-    <div class="right">
-      <div class="status" id="footerStatus">Ready</div>
-      <button class="btn small" id="btnCsv">CSV</button>
-      <button class="btn small" id="btnGJ">GeoJSON</button>
-      <button class="btn small" id="btnTif">GeoTIFF</button>
-      <button class="btn small" id="btnAll">All</button>
+  
+<div class="footerbar">
+  <div class="right">
+    <div class="status" id="footerStatus">Ready</div>
+
+    <div id="exportBusy" style="display:none; align-items:center; gap:8px;">
+      <div class="spinner"></div>
+      <div id="busyMsg" class="muted">Exporting…</div>
+      <div class="progressShell" style="width:140px;">
+        <div class="progressBar" id="bar"></div>
+      </div>
+    </div>
+
+    <span class="muted exportLabel" title="Choose an export format. Files download to your computer."><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M12 3a1 1 0 0 1 1 1v9.59l2.3-2.3a1 1 0 1 1 1.4 1.42l-4.01 4.01a1 1 0 0 1-1.38 0L7.3 12.71a1 1 0 0 1 1.4-1.42L11 13.59V4a1 1 0 0 1 1-1Zm-7 16a1 1 0 0 1 1-1h12a1 1 0 1 1 0 2H6a1 1 0 0 1-1-1Z"/></svg><span>Export as</span></span>
+      <button class="btn small" id="btnCsv" title="CSV: Tabular samples (UTC timestamp, GNSS raw/corrected, depth, quality flags) — best for spreadsheets.">CSV</button>
+    <button class="btn small" id="btnGJ" title="GeoJSON: Map-ready points + track lines with depth & metadata — best for GIS/QGIS and web mapping.">GeoJSON</button>
+    <button class="btn small" id="btnTif" title="GeoTIFF: Gridded depth raster (meters) in Web Mercator — best for GIS rasters and surface visualization.">GeoTIFF</button>
+    <button class="btn small" id="btnAll" title="All: Export CSV + GeoJSON + GeoTIFF (if GeoTIFF deps installed).">All</button>
+
+    <div id="downloads" style="display:flex; flex-direction:column; gap:2px; margin-left:10px;"></div>
+  </div>
+</div>
+
+<div id="settingsModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:2000;">
+  <div style="width:420px; max-width:calc(100vw - 24px); margin:90px auto; background:rgba(20,20,20,0.95); color:#fff; border-radius:14px; padding:14px; border:1px solid rgba(255,255,255,0.12);">
+    <div style="display:flex; align-items:center; justify-content:space-between;">
+      <div style="font-size:18px; font-weight:800;">Settings</div>
+      <button class="btn small" id="btnCloseSettings">✕</button>
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="row"><span class="muted">GPS Port</span><input id="gpsPort" style="width:220px;" /></div>
+    <div class="row"><span class="muted">GPS Baud</span><input id="gpsBaud" style="width:220px;" /></div>
+
+    <div class="divider"></div>
+
+    <div class="row"><span class="muted">Ping Port</span><input id="pingPort" style="width:220px;" /></div>
+    <div class="row"><span class="muted">Ping Baud</span><input id="pingBaud" style="width:220px;" /></div>
+
+    <div class="divider"></div>
+
+    <div id="settingsMsg" class="muted" style="min-height:18px;"></div>
+
+    <div style="display:flex; gap:10px; justify-content:flex-end; margin-top:12px;">
+      <button class="btn" id="btnReloadPorts">Reload</button>
+      <button class="btn green" id="btnSaveSettings">Save & Reconnect</button>
     </div>
   </div>
+</div>
 
   <script src="/static/app.js"></script>
 </body>
