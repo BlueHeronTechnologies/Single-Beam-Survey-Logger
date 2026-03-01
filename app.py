@@ -31,6 +31,8 @@ def load_config_defaults(args) -> dict:
         "gps_baud": args.gps_baud,
         "ping_port": args.ping_port,
         "ping_baud": args.ping_baud,
+        "offsets["forward"]": args.offsets["forward"],
+        "offsets["right"]": args.offsets["right"],
     }
     if os.path.exists(CONFIG_PATH):
         try:
@@ -565,10 +567,11 @@ class TileDownloadManager:
 
 
 def start_web_ui(shared: SharedState, survey: SurveyController, sqlite_logger: Optional[SQLiteLogger], sqlite_path: Optional[str],
-                 basemaps: dict, ant_forward_m: float, ant_right_m: float, stale_seconds: float, host: str, port: int,
+                 basemaps: dict, offsets["forward"]: float, offsets["right"]: float, stale_seconds: float, host: str, port: int,
                  config: dict, gps_mgr: GPSReader, ping_mgr: PingReader):
     app = Flask(__name__, static_folder="web", static_url_path="/static")
     app.basemaps = basemaps
+    offsets = {"forward": float(config.get("offsets["forward"]", 0.0)), "right": float(config.get("offsets["right"]", 0.0))}
     tile_mgr = TileDownloadManager(basemaps_json_path=os.path.abspath(os.environ.get('BASEMAPS_JSON', 'basemaps.json')),
                                  basemaps_dir=os.path.abspath('basemaps'))
 
@@ -672,7 +675,7 @@ def tilepack_cancel(job_id: str):
             raw_lat = shared.gps.lat_deg
             raw_lon = shared.gps.lon_deg
             cog = shared.gps.cog_deg
-            corr_lat, corr_lon = apply_antenna_offset(raw_lat, raw_lon, cog, ant_forward_m, ant_right_m)
+            corr_lat, corr_lon = apply_antenna_offset(raw_lat, raw_lon, cog, offsets["forward"], offsets["right"])
 
             payload = {
                 "pc_time_utc_iso": utc_iso_now(),
@@ -705,6 +708,8 @@ def get_config():
         "gps_baud": config.get("gps_baud", 9600),
         "ping_port": config.get("ping_port", ""),
         "ping_baud": config.get("ping_baud", 115200),
+            "offsets["forward"]": config.get("offsets["forward"]", 0.0),
+            "offsets["right"]": config.get("offsets["right"]", 0.0),
         "gps_status": gps_mgr.status,
         "ping_status": ping_mgr.status,
     })
@@ -950,7 +955,7 @@ def main():
 
     threading.Thread(
         target=start_web_ui,
-        args=(shared, survey, sqlite_logger, args.sqlite, basemaps, args.ant_forward_m, args.ant_right_m, args.stale_seconds, args.web_host, args.web_port, cfg, gps_mgr, ping_mgr),
+        args=(shared, survey, sqlite_logger, args.sqlite, basemaps, args.offsets["forward"], args.offsets["right"], args.stale_seconds, args.web_host, args.web_port, cfg, gps_mgr, ping_mgr),
         daemon=True
     ).start()
 
@@ -969,7 +974,7 @@ def main():
                 raw_lat = shared.gps.lat_deg
                 raw_lon = shared.gps.lon_deg
                 cog = shared.gps.cog_deg
-                corr_lat, corr_lon = apply_antenna_offset(raw_lat, raw_lon, cog, args.ant_forward_m, args.ant_right_m)
+                corr_lat, corr_lon = apply_antenna_offset(raw_lat, raw_lon, cog, args.offsets["forward"], args.offsets["right"])
 
                 row = {
                     "pc_time_utc_iso": utc_iso_now(),

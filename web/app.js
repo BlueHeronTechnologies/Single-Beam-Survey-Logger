@@ -155,6 +155,8 @@ async function loadConfig() {
   if (gpsBaud) gpsBaud.value = j.gps_baud || "";
   if (pingPort) pingPort.value = j.ping_port || "";
   if (pingBaud) pingBaud.value = j.ping_baud || "";
+    if (antForward) antForward.value = (j.ant_forward_m ?? 0).toString();
+    if (antRight) antRight.value = (j.ant_right_m ?? 0).toString();
   settingsMsg.textContent = `Loaded. GPS: ${j.gps_status} • Ping: ${j.ping_status}`;
 }
 
