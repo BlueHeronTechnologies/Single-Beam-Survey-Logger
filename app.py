@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 import threading
+import requests
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -361,11 +362,215 @@ def load_basemaps(path: str) -> dict:
     return data
 
 
+# ===== Offline tile downloader (MBTiles) =====
+import math
+import sqlite3
+import uuid
+
+def _deg2num(lat_deg: float, lon_deg: float, zoom: int):
+    lat_rad = math.radians(lat_deg)
+    n = 2.0 ** zoom
+    xtile = int((lon_deg + 180.0) / 360.0 * n)
+    ytile = int((1.0 - math.log(math.tan(lat_rad) + 1 / math.cos(lat_rad)) / math.pi) / 2.0 * n)
+    return xtile, ytile
+
+def _clamp(v, lo, hi): 
+    return lo if v < lo else hi if v > hi else v
+
+def estimate_tile_count(bounds, min_zoom: int, max_zoom: int) -> int:
+    south, west, north, east = bounds
+    total = 0
+    for z in range(min_zoom, max_zoom + 1):
+        x_min, y_s = _deg2num(south, west, z)
+        x_max, y_n = _deg2num(north, east, z)
+        x0, x1 = sorted((x_min, x_max))
+        y0, y1 = sorted((y_n, y_s))
+        total += (x1 - x0 + 1) * (y1 - y0 + 1)
+    return int(total)
+
+class TileDownloadManager:
+    def __init__(self, basemaps_json_path: str, basemaps_dir: str = "basemaps"):
+        self.lock = threading.Lock()
+        self.jobs = {}
+        self.basemaps_json_path = basemaps_json_path
+        self.basemaps_dir = basemaps_dir
+        os.makedirs(self.basemaps_dir, exist_ok=True)
+
+    def start(self, *, bounds, min_zoom: int, max_zoom: int, name: str, source: str = "osm"):
+        job_id = uuid.uuid4().hex
+        cancel_ev = threading.Event()
+        with self.lock:
+            self.jobs[job_id] = {"status": "running", "progress": 0, "message": "Queued", "total": 0, "done": 0, "name": name, "source": source, "cancel_ev": cancel_ev, "error": None}
+        t = threading.Thread(target=self._run, args=(job_id, bounds, min_zoom, max_zoom, name, source, cancel_ev), daemon=True)
+        t.start()
+        return job_id
+
+    def cancel(self, job_id: str) -> bool:
+        with self.lock:
+            j = self.jobs.get(job_id)
+            if not j: return False
+            j["cancel_ev"].set()
+            j["message"] = "Cancel requested…"
+            return True
+
+    def status(self, job_id: str):
+        with self.lock:
+            j = self.jobs.get(job_id)
+            if not j: return None
+            # return a serializable view (no Event)
+            total = int(j.get("total") or 0)
+            done = int(j.get("done") or 0)
+            progress = int((done / total) * 100) if total > 0 else int(j.get("progress") or 0)
+            return {
+                "status": j.get("status"),
+                "progress": progress,
+                "message": j.get("message"),
+                "total": total,
+                "done": done,
+                "name": j.get("name"),
+                "source": j.get("source"),
+                "error": j.get("error"),
+            }
+
+    def _tile_url(self, source: str, z: int, x: int, y: int) -> str:
+        # y is XYZ scheme
+        if source == "osm":
+            return f"https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+        return f"https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+
+    def _run(self, job_id: str, bounds, min_zoom: int, max_zoom: int, name: str, source: str, cancel_ev: threading.Event):
+        south, west, north, east = bounds
+        min_zoom = int(_clamp(min_zoom, 0, 19))
+        max_zoom = int(_clamp(max_zoom, 0, 19))
+        if max_zoom < min_zoom:
+            min_zoom, max_zoom = max_zoom, min_zoom
+
+        # Build tile list
+        tiles = []
+        for z in range(min_zoom, max_zoom + 1):
+            x_min, y_s = _deg2num(south, west, z)
+            x_max, y_n = _deg2num(north, east, z)
+            x0, x1 = sorted((x_min, x_max))
+            y0, y1 = sorted((y_n, y_s))  # y_n is smaller (north), y_s larger (south)
+            for x in range(x0, x1 + 1):
+                for y in range(y0, y1 + 1):
+                    tiles.append((z, x, y))
+
+        mbtiles_path = os.path.join(self.basemaps_dir, f"{name}.mbtiles")
+        try:
+            if os.path.exists(mbtiles_path):
+                # prevent overwrite; create unique suffix
+                base = name
+                k = 1
+                while os.path.exists(os.path.join(self.basemaps_dir, f"{base}_{k}.mbtiles")):
+                    k += 1
+                name = f"{base}_{k}"
+                mbtiles_path = os.path.join(self.basemaps_dir, f"{name}.mbtiles")
+
+            with self.lock:
+                self.jobs[job_id]["total"] = len(tiles)
+                self.jobs[job_id]["done"] = 0
+                self.jobs[job_id]["message"] = f"Downloading {len(tiles)} tiles…"
+
+            conn = sqlite3.connect(mbtiles_path)
+            conn.execute("PRAGMA synchronous=OFF;")
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("CREATE TABLE IF NOT EXISTS tiles (zoom_level INTEGER, tile_column INTEGER, tile_row INTEGER, tile_data BLOB);")
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS tile_index ON tiles (zoom_level, tile_column, tile_row);")
+            conn.execute("CREATE TABLE IF NOT EXISTS metadata (name TEXT, value TEXT);")
+            conn.commit()
+
+            # Metadata (basic)
+            meta = {
+                "name": name,
+                "format": "png",
+                "type": "baselayer",
+                "minzoom": str(min_zoom),
+                "maxzoom": str(max_zoom),
+                "bounds": f"{west},{south},{east},{north}",
+            }
+            conn.execute("DELETE FROM metadata;")
+            for k, v in meta.items():
+                conn.execute("INSERT INTO metadata (name, value) VALUES (?, ?);", (k, str(v)))
+            conn.commit()
+
+            sess = requests.Session()
+            sess.headers.update({
+                "User-Agent": "gps-ping-survey/1.0 (offline tile download; local field unit)"
+            })
+
+            ok_count = 0
+            for i, (z, x, y) in enumerate(tiles, start=1):
+                if cancel_ev.is_set():
+                    with self.lock:
+                        self.jobs[job_id]["status"] = "canceled"
+                        self.jobs[job_id]["message"] = "Canceled."
+                    conn.close()
+                    try: os.remove(mbtiles_path)
+                    except Exception: pass
+                    return
+
+                url = self._tile_url(source, z, x, y)
+                try:
+                    r = sess.get(url, timeout=10)
+                    if r.status_code == 200 and r.content:
+                        # Convert XYZ y to TMS tile_row
+                        tms_y = (2 ** z - 1) - y
+                        conn.execute("INSERT OR REPLACE INTO tiles VALUES (?, ?, ?, ?);", (z, x, tms_y, sqlite3.Binary(r.content)))
+                        ok_count += 1
+                    else:
+                        # skip missing
+                        pass
+                except Exception:
+                    pass
+
+                if i % 25 == 0:
+                    conn.commit()
+
+                with self.lock:
+                    self.jobs[job_id]["done"] = i
+                    self.jobs[job_id]["message"] = f"Downloaded {i}/{len(tiles)} tiles ({ok_count} ok)"
+
+                # Be polite to public servers
+                time.sleep(0.05)
+
+            conn.commit()
+            conn.close()
+
+            # Update basemaps.json to include new entry
+            try:
+                with open(self.basemaps_json_path, "r", encoding="utf-8") as f:
+                    bm = json.load(f)
+            except Exception:
+                bm = {}
+
+            map_id = name
+            bm[map_id] = {"path": mbtiles_path, "label": f"{name} (offline)", "format": "png"}
+            with open(self.basemaps_json_path, "w", encoding="utf-8") as f:
+                json.dump(bm, f, indent=2)
+
+            with self.lock:
+                self.jobs[job_id]["status"] = "done"
+                self.jobs[job_id]["message"] = f"Done. Saved {ok_count} tiles to {mbtiles_path}."
+        except Exception as e:
+            with self.lock:
+                self.jobs[job_id]["status"] = "error"
+                self.jobs[job_id]["error"] = str(e)
+                self.jobs[job_id]["message"] = str(e)
+            try:
+                if os.path.exists(mbtiles_path):
+                    os.remove(mbtiles_path)
+            except Exception:
+                pass
+
+
 def start_web_ui(shared: SharedState, survey: SurveyController, sqlite_logger: Optional[SQLiteLogger], sqlite_path: Optional[str],
                  basemaps: dict, ant_forward_m: float, ant_right_m: float, stale_seconds: float, host: str, port: int,
                  config: dict, gps_mgr: GPSReader, ping_mgr: PingReader):
     app = Flask(__name__, static_folder="web", static_url_path="/static")
     app.basemaps = basemaps
+    tile_mgr = TileDownloadManager(basemaps_json_path=os.path.abspath(os.environ.get('BASEMAPS_JSON', 'basemaps.json')),
+                                 basemaps_dir=os.path.abspath('basemaps'))
 
     def mbtiles_get_tile(mbtiles_path: str, z: int, x: int, y_xyz: int):
         import sqlite3
@@ -385,6 +590,16 @@ def start_web_ui(shared: SharedState, survey: SurveyController, sqlite_logger: O
             out.append({"id": map_id, "label": cfg.get("label", map_id), "format": cfg.get("format", "png")})
         return jsonify(out)
 
+
+@app.post("/basemaps/reload")
+def basemaps_reload():
+    try:
+        app.basemaps = load_basemaps(os.environ.get("BASEMAPS_JSON", "basemaps.json"))
+        return jsonify({"ok": True, "count": len(app.basemaps)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
     @app.get("/tiles/<map_id>/<int:z>/<int:x>/<int:y>.<ext>")
     def tiles(map_id: str, z: int, x: int, y: int, ext: str):
         cfg = app.basemaps.get(map_id)
@@ -398,6 +613,49 @@ def start_web_ui(shared: SharedState, survey: SurveyController, sqlite_logger: O
             abort(404)
         mimetype = "image/png" if fmt == "png" else "image/jpeg"
         return Response(data, mimetype=mimetype)
+
+
+
+@app.post("/tilepack/estimate")
+def tilepack_estimate():
+    data = request.get_json(force=True) or {}
+    bounds = data.get("bounds")
+    if not bounds or len(bounds) != 4:
+        return jsonify({"error": "bounds must be [south, west, north, east]"}), 400
+    min_zoom = int(data.get("min_zoom", 12))
+    max_zoom = int(data.get("max_zoom", 16))
+    count = estimate_tile_count(bounds, min_zoom, max_zoom)
+    # crude estimate ~20 KB per PNG tile
+    est_bytes = int(count * 20_000)
+    return jsonify({"tile_count": count, "estimated_bytes": est_bytes})
+
+@app.post("/tilepack/start")
+def tilepack_start():
+    data = request.get_json(force=True) or {}
+    bounds = data.get("bounds")
+    if not bounds or len(bounds) != 4:
+        return jsonify({"error": "bounds must be [south, west, north, east]"}), 400
+    name = (data.get("name") or "offline_tiles").strip()
+    min_zoom = int(data.get("min_zoom", 12))
+    max_zoom = int(data.get("max_zoom", 16))
+    source = (data.get("source") or "osm").strip()
+    job_id = tile_mgr.start(bounds=bounds, min_zoom=min_zoom, max_zoom=max_zoom, name=name, source=source)
+    return jsonify({"job_id": job_id})
+
+@app.get("/tilepack/status/<job_id>")
+def tilepack_status(job_id: str):
+    st = tile_mgr.status(job_id)
+    if not st:
+        return jsonify({"error": "unknown job"}), 404
+    return jsonify(st)
+
+@app.post("/tilepack/cancel/<job_id>")
+def tilepack_cancel(job_id: str):
+    ok = tile_mgr.cancel(job_id)
+    if not ok:
+        return jsonify({"error": "unknown job"}), 404
+    return jsonify({"ok": True})
+
 
     @app.get("/")
     def index():
@@ -672,6 +930,7 @@ def main():
     os.environ["PING_PORT"] = args.ping_port
     os.environ["PING_BAUD"] = str(args.ping_baud)
     os.environ["LOG_HZ"] = str(args.log_hz)
+    os.environ["BASEMAPS_JSON"] = args.basemaps
     os.environ["PING_HZ"] = str(args.ping_hz)
 
     basemaps = load_basemaps(args.basemaps)

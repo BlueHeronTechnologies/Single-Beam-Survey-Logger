@@ -3,6 +3,7 @@
   const map = L.map('map', { zoomControl: true }).setView([30.32016, -89.25093], 14);
 
   let baseLayers = {};
+  let layersControl = null;
   let activeBaseLayer = null;
 
   async function initBasemaps() {
@@ -19,7 +20,7 @@
       activeBaseLayer = baseLayers[firstKey];
       activeBaseLayer.addTo(map);
     }
-    L.control.layers(baseLayers, null, { collapsed: false }).addTo(map);
+        layersControl = L.control.layers(baseLayers, null, { collapsed: false }).addTo(map);
 
     map.on("baselayerchange", (e) => {
       activeBaseLayer = e.layer;
@@ -28,6 +29,21 @@
 
     applyOpacityFromSlider();
   }
+
+
+async function refreshBasemapsFromServer() {
+  try {
+    const r = await fetch("/basemaps", { cache: "no-store" });
+    const maps = await r.json();
+    maps.forEach(m => {
+      if (baseLayers[m.label]) return;
+      const url = `/tiles/${m.id}/{z}/{x}/{y}.${m.format}`;
+      const layer = L.tileLayer(url, { maxZoom: 19, minZoom: 0, opacity: 1.0 });
+      baseLayers[m.label] = layer;
+      if (layersControl && layersControl.addBaseLayer) layersControl.addBaseLayer(layer, m.label);
+    });
+  } catch (e) {}
+}
 
   let marker = null;
   function makeArrowIcon(headingDeg) {
@@ -398,5 +414,166 @@ if (!active) {
   }
 
   initBasemaps();
+
+  // Rectangle selection + offline tile download
+  const drawnItems = new L.FeatureGroup();
+  map.addLayer(drawnItems);
+  let drawnBounds = null;
+
+  const drawControl = new L.Control.Draw({
+    draw: { rectangle: true, polygon: false, circle: false, circlemarker: false, marker: false, polyline: false },
+    edit: { featureGroup: drawnItems, edit: false, remove: true }
+  });
+  map.addControl(drawControl);
+
+  map.on(L.Draw.Event.CREATED, function (e) {
+    drawnItems.clearLayers();
+    drawnItems.addLayer(e.layer);
+    drawnBounds = e.layer.getBounds();
+    updateTileBoundsUI();
+  });
+  map.on(L.Draw.Event.DELETED, function () {
+    drawnBounds = null;
+    updateTileBoundsUI();
+  });
+
+  const tileModal = document.getElementById("tileModal");
+  const btnDownloadTiles = document.getElementById("btnDownloadTiles");
+  const btnCloseTileModal = document.getElementById("btnCloseTileModal");
+  const btnStartTileDownload = document.getElementById("btnStartTileDownload");
+  const btnCancelTileDownload = document.getElementById("btnCancelTileDownload");
+  const btnEstimateTiles = document.getElementById("btnEstimateTiles");
+  const tileBoundsLabel = document.getElementById("tileBoundsLabel");
+  const tileEstimate = document.getElementById("tileEstimate");
+  const tileBusy = document.getElementById("tileBusy");
+  const tileBusyMsg = document.getElementById("tileBusyMsg");
+  const tileProgressBar = document.getElementById("tileProgressBar");
+  const tileName = document.getElementById("tileName");
+  const minZoom = document.getElementById("minZoom");
+  const maxZoom = document.getElementById("maxZoom");
+  const tileSource = document.getElementById("tileSource");
+
+  function boundsToPayload(b) {
+    const sw = b.getSouthWest();
+    const ne = b.getNorthEast();
+    return [sw.lat, sw.lng, ne.lat, ne.lng]; // south, west, north, east
+  }
+
+  function updateTileBoundsUI() {
+    if (!tileBoundsLabel) return;
+    if (!drawnBounds) {
+      tileBoundsLabel.textContent = "Draw rectangle on map";
+      if (tileEstimate) tileEstimate.textContent = "—";
+      return;
+    }
+    tileBoundsLabel.textContent = `${drawnBounds.getSouthWest().lat.toFixed(5)}, ${drawnBounds.getSouthWest().lng.toFixed(5)}  →  ${drawnBounds.getNorthEast().lat.toFixed(5)}, ${drawnBounds.getNorthEast().lng.toFixed(5)}`;
+    estimateTiles();
+  }
+
+  async function estimateTiles() {
+    if (!drawnBounds) { if (tileEstimate) tileEstimate.textContent = "—"; return; }
+    const body = {
+      bounds: boundsToPayload(drawnBounds),
+      min_zoom: parseInt(minZoom?.value || "12", 10),
+      max_zoom: parseInt(maxZoom?.value || "16", 10),
+      source: tileSource?.value || "osm"
+    };
+    try {
+      const r = await fetch("/tilepack/estimate", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || "estimate failed");
+      const mb = (j.estimated_bytes / (1024*1024)).toFixed(1);
+      tileEstimate.textContent = `${j.tile_count.toLocaleString()} tiles • ~${mb} MB`;
+    } catch (e) {
+      if (tileEstimate) tileEstimate.textContent = "Estimate failed";
+    }
+  }
+
+  let tileJobId = null;
+  async function startTileDownload() {
+    if (!drawnBounds) { alert("Draw a rectangle on the map first."); return; }
+    const name = (tileName?.value || "offline_tiles").trim();
+    const body = {
+      bounds: boundsToPayload(drawnBounds),
+      min_zoom: parseInt(minZoom?.value || "12", 10),
+      max_zoom: parseInt(maxZoom?.value || "16", 10),
+      source: tileSource?.value || "osm",
+      name
+    };
+
+    btnStartTileDownload.disabled = true;
+    btnCancelTileDownload.disabled = false;
+    btnEstimateTiles.disabled = true;
+    tileBusy.style.display = "block";
+    tileBusyMsg.textContent = "Starting…";
+    tileProgressBar.style.width = "0%";
+
+    try {
+      const r = await fetch("/tilepack/start", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || "start failed");
+      tileJobId = j.job_id;
+      pollTileJob();
+    } catch (e) {
+      tileBusyMsg.textContent = "Start failed: " + e.message;
+      btnStartTileDownload.disabled = false;
+      btnCancelTileDownload.disabled = true;
+      btnEstimateTiles.disabled = false;
+    }
+  }
+
+  async function pollTileJob() {
+    if (!tileJobId) return;
+    try {
+      const r = await fetch(`/tilepack/status/${tileJobId}`, { cache: "no-store" });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || "status failed");
+
+      tileBusyMsg.textContent = j.message || j.status;
+      tileProgressBar.style.width = `${j.progress || 0}%`;
+
+      if (j.status === "done") {
+        btnCancelTileDownload.disabled = true;
+        btnStartTileDownload.disabled = false;
+        btnEstimateTiles.disabled = false;
+        tileJobId = null;
+        tileBusyMsg.textContent = "Done. Adding basemap…";
+        // Ask server to reload basemaps, then refresh client list
+        await fetch("/basemaps/reload", { method:"POST" });
+        await refreshBasemapsFromServer();
+        tileBusyMsg.textContent = "Download complete.";
+        setTimeout(() => { tileBusy.style.display = "none"; }, 1200);
+        return;
+      }
+
+      if (j.status === "canceled" || j.status === "error") {
+        btnCancelTileDownload.disabled = true;
+        btnStartTileDownload.disabled = false;
+        btnEstimateTiles.disabled = false;
+        tileJobId = null;
+        return;
+      }
+
+      setTimeout(pollTileJob, 700);
+    } catch (e) {
+      setTimeout(pollTileJob, 1200);
+    }
+  }
+
+  async function cancelTileDownload() {
+    if (!tileJobId) return;
+    btnCancelTileDownload.disabled = true;
+    try { await fetch(`/tilepack/cancel/${tileJobId}`, { method:"POST" }); } catch(e) {}
+  }
+
+  if (btnDownloadTiles && tileModal) {
+    btnDownloadTiles.onclick = () => { tileModal.style.display = "block"; updateTileBoundsUI(); };
+  }
+  if (btnCloseTileModal && tileModal) btnCloseTileModal.onclick = () => { tileModal.style.display = "none"; };
+  if (tileModal) tileModal.addEventListener("click", (e) => { if (e.target === tileModal) tileModal.style.display = "none"; });
+  if (btnStartTileDownload) btnStartTileDownload.onclick = startTileDownload;
+  if (btnCancelTileDownload) btnCancelTileDownload.onclick = cancelTileDownload;
+  if (btnEstimateTiles) btnEstimateTiles.onclick = estimateTiles;
+
   tick();
 })();

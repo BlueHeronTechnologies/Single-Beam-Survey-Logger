@@ -7,6 +7,8 @@
 
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
+  <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
 
   <link rel="stylesheet" href="/static/style.css" />
 </head>
@@ -92,6 +94,9 @@
     </div>
     <input id="swathOpacitySlider" class="slider" type="range" min="0" max="100" value="35">
 
+    <button class="btn small" id="btnDownloadTiles" style="margin-top:10px;">Download Map Area</button>
+    <div class="muted" style="font-size:12px; margin-top:6px;">Draw a rectangle on the map, then download tiles to the Pi.</div>
+
     <div class="divider"></div>
 
     <div class="row">
@@ -160,6 +165,52 @@
     <div style="display:flex; gap:10px; justify-content:flex-end; margin-top:12px;">
       <button class="btn" id="btnReloadPorts">Reload</button>
       <button class="btn green" id="btnSaveSettings">Save & Reconnect</button>
+    </div>
+  </div>
+</div>
+
+  
+<div id="tileModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:2200;">
+  <div style="width:520px; max-width:calc(100vw - 24px); margin:70px auto; background:rgba(20,20,20,0.95); color:#fff; border-radius:14px; padding:14px; border:1px solid rgba(255,255,255,0.12);">
+    <div style="display:flex; align-items:center; justify-content:space-between;">
+      <div style="font-size:18px; font-weight:800;">Download Offline Tiles</div>
+      <button class="btn small" id="btnCloseTileModal">✕</button>
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="row"><span class="muted">Source</span>
+      <select id="tileSource" style="width:280px;">
+        <option value="osm">OpenStreetMap (public)</option>
+      </select>
+    </div>
+
+    <div class="row"><span class="muted">Name</span><input id="tileName" style="width:280px;" placeholder="e.g., biloxi_bay_osm" /></div>
+
+    <div class="row"><span class="muted">Min Zoom</span><input type="number" id="minZoom" style="width:120px;" value="12" min="0" max="19" /></div>
+    <div class="row"><span class="muted">Max Zoom</span><input type="number" id="maxZoom" style="width:120px;" value="16" min="0" max="19" /></div>
+
+    <div class="row"><span class="muted">Area (bounds)</span><span id="tileBoundsLabel">Draw rectangle on map</span></div>
+    <div class="row"><span class="muted">Estimate</span><span id="tileEstimate">—</span></div>
+
+    <div class="divider"></div>
+
+    <div id="tileBusy" style="display:none;">
+      <div style="display:flex; align-items:center; gap:8px;">
+        <div class="spinner"></div>
+        <div id="tileBusyMsg" class="muted">Downloading…</div>
+      </div>
+      <div class="progressShell" style="margin-top:8px;"><div class="progressBar" id="tileProgressBar"></div></div>
+    </div>
+
+    <div class="muted" style="font-size:12px; margin-top:10px; line-height:1.35;">
+      Note: Public tile servers often restrict bulk downloads. For heavy use, consider a paid provider or self-hosted tiles.
+    </div>
+
+    <div style="display:flex; gap:10px; justify-content:flex-end; margin-top:12px;">
+      <button class="btn" id="btnEstimateTiles">Re-estimate</button>
+      <button class="btn red" id="btnCancelTileDownload" disabled>Cancel</button>
+      <button class="btn green" id="btnStartTileDownload">Download</button>
     </div>
   </div>
 </div>

@@ -80,3 +80,8 @@ hostname -I
 ## Settings (Ports/Baud)
 
 Use the **⚙ Settings** button in the header to configure GPS/Ping ports and baud rates. Settings are saved to `config.json` and the app will reconnect immediately.
+
+
+## Download Offline Tiles
+
+Use **Download Map Area** in the sidebar. Draw a rectangle on the map, choose min/max zoom, and download tiles to the Pi as a new `.mbtiles` basemap. The new basemap will appear automatically in the basemap selector.
