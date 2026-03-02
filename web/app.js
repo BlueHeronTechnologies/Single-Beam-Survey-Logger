@@ -1,6 +1,8 @@
 /* global L */
 (() => {
-  const map = L.map('map', { zoomControl: true }).setView([30.32016, -89.25093], 14);
+  const map = L.map('map', { zoomControl: false }).setView([30.32016, -89.25093], 14);
+
+  L.control.zoom({ position: "topright" }).addTo(map);
 
   let baseLayers = {};
   let layersControl = null;
@@ -11,8 +13,13 @@
     const maps = await r.json();
 
     maps.forEach(m => {
-      const url = `/tiles/${m.id}/{z}/{x}/{y}.${m.format}`;
-      baseLayers[m.label] = L.tileLayer(url, { maxZoom: 19, minZoom: 0, opacity: 1.0 });
+      const url = m.url ? m.url : `/tiles/${m.id}/{z}/{x}/{y}.${m.format}`;
+      baseLayers[m.label] = L.tileLayer(url, {
+        maxZoom: (m.maxZoom || 19),
+        minZoom: 0,
+        opacity: 1.0,
+        attribution: (m.attribution || "")
+      });
     });
 
     const firstKey = Object.keys(baseLayers)[0];
@@ -37,10 +44,18 @@ async function refreshBasemapsFromServer() {
     const maps = await r.json();
     maps.forEach(m => {
       if (baseLayers[m.label]) return;
-      const url = `/tiles/${m.id}/{z}/{x}/{y}.${m.format}`;
-      const layer = L.tileLayer(url, { maxZoom: 19, minZoom: 0, opacity: 1.0 });
+
+      const url = m.url ? m.url : `/tiles/${m.id}/{z}/{x}/{y}.${m.format}`;
+      const layer = L.tileLayer(url, {
+        maxZoom: (m.maxZoom || 19),
+        minZoom: 0,
+        opacity: 1.0,
+        attribution: (m.attribution || "")
+      });
+
       baseLayers[m.label] = layer;
-      if (layersControl && layersControl.addBaseLayer) layersControl.addBaseLayer(layer, m.label);
+      if (layersControl && layersControl.addBaseLayer)
+        layersControl.addBaseLayer(layer, m.label);
     });
   } catch (e) {}
 }
@@ -128,11 +143,7 @@ async function refreshBasemapsFromServer() {
   document.getElementById("followToggle").addEventListener("change", (e) => { followVessel = !!e.target.checked; });
   document.getElementById("clearTrack").onclick = () => { trackLine.setLatLngs([]); swathLayer.clearLayers(); lastTrackLL = null; lastSwathLL = null; };
 
-  async function postJSON(url, body) {
-    const r = await fetch(url, { method:"POST", headers:{"Content-Type":"application/json"}
-
-
-// Settings modal
+  async function postJSON(url, body) { const r = await fetch(url, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body || {}) }); const j = await r.json(); if (!r.ok) throw new Error(j.error || "request failed"); return j; } // Settings modal
 const modal = document.getElementById("settingsModal");
 const btnSettings = document.getElementById("btnSettings");
 const btnCloseSettings = document.getElementById("btnCloseSettings");
@@ -160,6 +171,14 @@ async function loadConfig() {
   settingsMsg.textContent = `Loaded. GPS: ${j.gps_status} • Ping: ${j.ping_status}`;
 }
 
+
+function tileUrlFor(m) {
+  if (m && m.url && String(m.url).trim().length > 0) return m.url;
+  const fmt = (m && m.format) ? m.format : "png";
+  return `/tiles/${m.id}/{z}/{x}/{y}.${fmt}`;
+}
+
+
 if (btnSettings && modal) {
   btnSettings.onclick = async () => {
     modal.style.display = "block";
@@ -186,14 +205,7 @@ if (btnSaveSettings) btnSaveSettings.onclick = async () => {
   } catch (e) {
     settingsMsg.textContent = "Save failed: " + e.message;
   }
-};
-, body: JSON.stringify(body || {}) });
-    const j = await r.json();
-    if (!r.ok) throw new Error(j.error || "request failed");
-    return j;
-  }
-
-  document.getElementById("btnStartSurvey").onclick = async () => { await postJSON("/survey/start", { notes: "", line_label: "Line 1" }); };
+}; document.getElementById("btnStartSurvey").onclick = async () => { await postJSON("/survey/start", { notes: "", line_label: "Line 1" }); };
   document.getElementById("btnStopSurvey").onclick = async () => { await postJSON("/survey/stop"); };
   document.getElementById("btnPauseSurvey").onclick = async () => {
     const st = await (await fetch("/survey/status", {cache:"no-store"})).json();
@@ -424,7 +436,8 @@ if (!active) {
 
   const drawControl = new L.Control.Draw({
     draw: { rectangle: true, polygon: false, circle: false, circlemarker: false, marker: false, polyline: false },
-    edit: { featureGroup: drawnItems, edit: false, remove: true }
+    edit: { featureGroup: drawnItems, edit: false, remove: true },
+    position: "topright"
   });
   map.addControl(drawControl);
 
