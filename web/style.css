@@ -1,6 +1,29 @@
-html, body, #map { height: 100%; margin: 0; }
+html, body { height: 100%; margin: 0; overflow: hidden; }
 body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
 
+/* Map occupies the area between the fixed header and footer */
+#map{
+  position: fixed;
+  top: 56px;
+  bottom: 52px;
+  left: 0;
+  right: 0;
+}
+
+#map .leaflet-control-container{
+  position: absolute;
+  inset: 0;
+}
+
+#map .leaflet-top,
+#map .leaflet-bottom{
+  position: absolute;
+  z-index: 1200;
+}
+
+#map .leaflet-control{
+  pointer-events: auto;
+}
 .headerbar {
   position: fixed;
   top: 0; left: 0; right: 0;

@@ -1,0 +1,10 @@
+{
+  "gps_port": "",
+  "gps_baud": 9600,
+  "ping_port": "",
+  "ping_baud": 115200,
+  "offsets": {
+    "forward_m": 0.0,
+    "right_m": 0.0
+  }
+}

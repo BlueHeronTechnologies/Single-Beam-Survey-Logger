@@ -1,17 +1,23 @@
 {
-  "osm": {
-    "label": "OSM Raster (offline)",
-    "path": "/home/pi/maps/osm.mbtiles",
+  "osm_online": {
+    "label": "OpenStreetMap Online",
+    "url": "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+    "attribution": "\u00a9 OpenStreetMap contributors",
+    "maxZoom": 19,
     "format": "png"
   },
-  "sat": {
-    "label": "Satellite (offline)",
-    "path": "/home/pi/maps/sat.mbtiles",
+  "satellite_online": {
+    "label": "Satellite (Esri World Imagery)",
+    "url": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+    "attribution": "Tiles \u00a9 Esri",
+    "maxZoom": 19,
     "format": "jpg"
   },
-  "naut": {
-    "label": "Nautical (offline)",
-    "path": "/home/pi/maps/nautical.mbtiles",
-    "format": "png"
+  "offline_local": {
+    "label": "Offline Local (MBTiles)",
+    "path": "basemaps/offline_local.mbtiles",
+    "format": "png",
+    "maxZoom": 19,
+    "attribution": ""
   }
 }
